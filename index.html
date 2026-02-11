@@ -1,0 +1,512 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithCustomToken, 
+  onAuthStateChanged
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  onSnapshot, 
+  addDoc,
+  doc,
+  setDoc,
+  updateDoc,
+  deleteDoc,
+  query,
+  getDocs,
+  writeBatch
+} from 'firebase/firestore';
+import { 
+  PlusCircle, Star, Home, User, 
+  Sparkles, X, BookOpen, Trash2, MessageCircle, Heart, Music, Film, Book, Upload, Image as ImageIcon, Send, Camera, Edit2
+} from 'lucide-react';
+
+// --- Firebase Configuration ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'reviewverse-v2-final-permanent';
+
+// --- Genre Classifications ---
+const CATEGORIES = {
+  musik: ['Pop', 'Rock', 'Jazz', 'R&B', 'EDM', 'Hip-Hop', 'Country', 'Reggae', 'Metal', 'Dangdut'],
+  film: ['Aksi', 'Komedi', 'Drama', 'Horor', 'Petualangan', 'Romansa', 'Sci-Fi', 'Fantasi', 'Thriller'],
+  novel: ['Romance', 'Fantasi', 'Sci-Fi', 'Horor', 'Misteri', 'Kriminal', 'Petualangan', 'Sejarah', 'Komedi']
+};
+
+// --- Initial Recommendation Data ---
+const INITIAL_RECS = [
+  // FILM
+  { workTitle: "Spider-Man: Into the Spider-Verse", category: "film", genre: "Aksi", author: "Bob Persichetti", rating: 5, content: "Visual revolusioner dengan cerita multiverse yang kuat.", creatorBio: "Sutradara: Bob Persichetti, Peter Ramsey, Rodney Rothman.", poster: "https://images.unsplash.com/photo-1635805737707-575885ab0820?auto=format&fit=crop&w=600" },
+  { workTitle: "Paddington", category: "film", genre: "Komedi", author: "Paul King", rating: 5, content: "Kisah hangat tentang keluarga dan penerimaan diri.", creatorBio: "Paul King adalah sutradara Inggris yang ahli dalam narasi visual.", poster: "https://images.unsplash.com/photo-1536440136628-849c177e76a1?auto=format&fit=crop&w=600" },
+  { workTitle: "Wonder", category: "film", genre: "Drama", author: "Stephen Chbosky", rating: 5, content: "Inspirasi tentang kebaikan dan keberanian.", creatorBio: "Penulis dan sutradara bertema pertumbuhan emosional.", poster: "https://images.unsplash.com/photo-1485846234645-a62644f84728?auto=format&fit=crop&w=600" },
+  // NOVEL
+  { workTitle: "Harry Potter", category: "novel", genre: "Fantasi", author: "J.K. Rowling", rating: 5, content: "Dunia sihir paling ikonik dalam sejarah literatur.", creatorBio: "Penulis asal Inggris pencipta fenomena global Hogwarts.", poster: "https://images.unsplash.com/photo-1626618012641-bfbca5a31239?auto=format&fit=crop&w=600" },
+  { workTitle: "Sherlock Holmes", category: "novel", genre: "Misteri", author: "Arthur Conan Doyle", rating: 5, content: "Detektif dengan kemampuan deduksi luar biasa.", creatorBio: "Dokter dan penulis asal Skotlandia pionir fiksi kriminal.", poster: "https://images.unsplash.com/photo-1589829085413-56de8ae18c73?auto=format&fit=crop&w=600" },
+  // MUSIK
+  { workTitle: "Shake It Off", category: "musik", genre: "Pop", author: "Taylor Swift", rating: 5, content: "Lagu pop ceria yang mengajak pendengar mengabaikan kebencian.", creatorBio: "Ikon pop global dengan kemampuan penulisan lagu naratif.", poster: "https://images.unsplash.com/photo-1514525253344-99a42999a22f?auto=format&fit=crop&w=600" }
+];
+
+const StarRating = ({ count, size = 16, interactive = false, onRate = null }) => (
+  <div className="flex gap-1">
+    {Array(5).fill(0).map((_, i) => (
+      <Star 
+        key={i} 
+        size={size} 
+        onClick={() => interactive && onRate && onRate(i + 1)}
+        className={`${i < count ? "fill-amber-400 text-amber-400" : "text-slate-200"} ${interactive ? 'cursor-pointer hover:scale-125 transition-transform' : ''}`} 
+      />
+    ))}
+  </div>
+);
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [profileData, setProfileData] = useState(null);
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [activeTab, setActiveTab] = useState('home');
+  const [allReviews, setAllReviews] = useState([]);
+  const [comments, setComments] = useState([]);
+  const [selectedItem, setSelectedItem] = useState(null);
+  const [newComment, setNewComment] = useState('');
+  const [filterCat, setFilterCat] = useState('semua');
+  const [filterGenre, setFilterGenre] = useState('semua');
+
+  const [formData, setFormData] = useState({
+    title: '', workTitle: '', category: 'film', genre: 'Aksi', rating: 5, content: '', poster: '', creatorBio: ''
+  });
+
+  // --- Auth & Data Initialization ---
+  useEffect(() => {
+    const initAuth = async () => {
+      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+        await signInWithCustomToken(auth, __initial_auth_token);
+      } else {
+        await signInAnonymously(auth);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      if (u) injectInitialData();
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const injectInitialData = async () => {
+    const q = collection(db, 'artifacts', appId, 'public', 'data', 'reviews');
+    const snap = await getDocs(q);
+    // Hanya injeksi jika database benar-benar kosong
+    if (snap.empty) {
+      const batch = writeBatch(db);
+      INITIAL_RECS.forEach((rec) => {
+        const docRef = doc(collection(db, 'artifacts', appId, 'public', 'data', 'reviews'));
+        batch.set(docRef, { 
+          ...rec, 
+          title: `Rekomendasi: ${rec.workTitle}`, 
+          userId: 'system', 
+          createdAt: Date.now(), 
+          date: '07/02/2026' 
+        });
+      });
+      await batch.commit();
+    }
+  };
+
+  useEffect(() => {
+    if (!user) return;
+    const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'info');
+    return onSnapshot(docRef, (snap) => {
+      if (snap.exists()) setProfileData(snap.data());
+      else {
+        const init = { 
+          displayName: 'Pengguna Baru', 
+          bio: 'Penikmat karya seni.', 
+          favGenres: { musik: [], film: [], novel: [] }, 
+          favorites: [] 
+        };
+        setDoc(docRef, init);
+        setProfileData(init);
+      }
+    });
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    const q = collection(db, 'artifacts', appId, 'public', 'data', 'reviews');
+    return onSnapshot(q, (snap) => {
+      setAllReviews(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+  }, [user]);
+
+  useEffect(() => {
+    if (!selectedItem) return;
+    const q = collection(db, 'artifacts', appId, 'public', 'data', 'comments');
+    return onSnapshot(q, (snap) => {
+      const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      setComments(data.filter(c => c.itemId === selectedItem.id).sort((a, b) => b.createdAt - a.createdAt));
+    });
+  }, [selectedItem]);
+
+  // --- Actions ---
+  const handleFileUpload = (e, callback) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => callback(reader.result);
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const submitReview = async (e) => {
+    e.preventDefault();
+    if (!user) return;
+    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'reviews'), {
+      ...formData,
+      userId: user.uid,
+      author: profileData?.displayName || 'Anonim',
+      date: new Date().toLocaleDateString('id-ID'),
+      createdAt: Date.now()
+    });
+    setFormData({ title: '', workTitle: '', category: 'film', genre: 'Aksi', rating: 5, content: '', poster: '', creatorBio: '' });
+    setActiveTab('home');
+  };
+
+  // Fungsi ini memperbarui data di Firestore secara PERMANEN
+  const updateItemPoster = async (newPoster) => {
+    if (!selectedItem || !selectedItem.id) return;
+    try {
+      const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'reviews', selectedItem.id);
+      await updateDoc(docRef, { poster: newPoster });
+      // Update state lokal agar UI langsung berubah
+      setSelectedItem(prev => ({ ...prev, poster: newPoster }));
+    } catch (err) {
+      console.error("Gagal memperbarui foto:", err);
+    }
+  };
+
+  const toggleFavorite = async (item) => {
+    if (!user) return;
+    const currentFavs = profileData.favorites || [];
+    const exists = currentFavs.find(f => f.id === item.id);
+    let updated = exists ? currentFavs.filter(f => f.id !== item.id) : [...currentFavs, { id: item.id, title: item.workTitle, poster: item.poster, category: item.category }];
+    await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'info'), { favorites: updated });
+  };
+
+  const deleteReview = async (id) => {
+    if (window.confirm("Hapus resensi ini secara permanen?")) {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'reviews', id));
+    }
+  };
+
+  const postComment = async (e) => {
+    e.preventDefault();
+    if (!newComment.trim() || !user) return;
+    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'comments'), {
+      itemId: selectedItem.id,
+      userId: user.uid,
+      author: profileData?.displayName || 'Tamu',
+      text: newComment,
+      createdAt: Date.now()
+    });
+    setNewComment('');
+  };
+
+  const toggleFavGenre = (cat, g) => {
+    const cur = [...(profileData.favGenres[cat] || [])];
+    const idx = cur.indexOf(g);
+    if (idx > -1) cur.splice(idx, 1); else cur.push(g);
+    setProfileData({...profileData, favGenres: {...profileData.favGenres, [cat]: cur}});
+  };
+
+  const filteredItems = useMemo(() => {
+    return allReviews.filter(item => {
+      const matchCat = filterCat === 'semua' || item.category === filterCat;
+      const matchGenre = filterGenre === 'semua' || item.genre === filterGenre;
+      return matchCat && matchGenre;
+    }).sort((a, b) => b.createdAt - a.createdAt);
+  }, [allReviews, filterCat, filterGenre]);
+
+  // --- UI Components ---
+  const renderHome = () => (
+    <div className="space-y-12 animate-in fade-in duration-1000 pb-32">
+      <section className="bg-slate-900 rounded-[3rem] p-12 md:p-24 text-white relative overflow-hidden shadow-2xl">
+        <div className="absolute top-0 right-0 w-1/2 h-full bg-indigo-500/10 blur-[150px]"></div>
+        <div className="relative z-10 space-y-6">
+          <h1 className="text-5xl md:text-8xl font-black tracking-tighter">Review<span className="text-indigo-400">Verse</span></h1>
+          <p className="text-slate-400 text-lg md:text-xl font-medium max-w-xl">Jelajahi, ulas, dan favoritkan karya terbaik dari seluruh dunia secara permanen.</p>
+        </div>
+      </section>
+
+      <div className="sticky top-24 z-30 flex flex-col md:flex-row gap-4 bg-white/80 backdrop-blur-2xl p-6 rounded-[2.5rem] border border-slate-100 shadow-xl">
+        <div className="flex gap-2 overflow-x-auto no-scrollbar">
+          {['semua', 'musik', 'film', 'novel'].map(cat => (
+            <button key={cat} onClick={() => {setFilterCat(cat); setFilterGenre('semua');}} className={`px-8 py-3 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all ${filterCat === cat ? 'bg-indigo-600 text-white shadow-lg' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'}`}>{cat}</button>
+          ))}
+        </div>
+        {filterCat !== 'semua' && (
+          <div className="flex gap-2 overflow-x-auto no-scrollbar border-l border-slate-200 pl-4">
+            {CATEGORIES[filterCat].map(g => (
+              <button key={g} onClick={() => setFilterGenre(g)} className={`px-5 py-2.5 rounded-xl text-[9px] font-black uppercase whitespace-nowrap transition-all ${filterGenre === g ? 'bg-indigo-50 text-indigo-600' : 'text-slate-400 hover:text-slate-600'}`}>{g}</button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-8">
+        {filteredItems.map(item => (
+          <div key={item.id} className="group bg-white rounded-[2.5rem] overflow-hidden border border-slate-100 shadow-sm hover:shadow-2xl hover:-translate-y-2 transition-all duration-500 cursor-pointer" onClick={() => setSelectedItem(item)}>
+            <div className="aspect-[3/4] relative overflow-hidden">
+              <img src={item.poster || "https://images.unsplash.com/photo-1516280440614-37939bbacd81?auto=format&fit=crop&w=600"} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700" alt={item.workTitle} />
+              <div className="absolute top-4 left-4 bg-white/95 backdrop-blur px-2 py-1 rounded-lg shadow-sm"><StarRating count={item.rating} size={8} /></div>
+            </div>
+            <div className="p-6">
+               <p className="text-[8px] font-black text-indigo-500 uppercase tracking-tighter mb-1">{item.genre}</p>
+               <h4 className="text-sm font-black text-slate-900 leading-tight line-clamp-1 group-hover:text-indigo-600 transition-colors">{item.workTitle}</h4>
+               <p className="text-[10px] text-slate-400 font-bold mt-1 uppercase tracking-widest">{item.author}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  const renderProfile = () => (
+    <div className="max-w-5xl mx-auto space-y-12 pb-32 animate-in slide-in-from-bottom-5 duration-700">
+      <div className="bg-white rounded-[4rem] p-12 shadow-2xl border border-slate-100 text-center relative overflow-hidden">
+        {isEditingProfile ? (
+          <div className="space-y-8">
+            <input className="text-3xl font-black text-center border-b-2 border-slate-100 outline-none w-full max-w-sm" value={profileData?.displayName} onChange={e => setProfileData({...profileData, displayName: e.target.value})} placeholder="Nama Tampilan" />
+            <textarea className="w-full p-6 bg-slate-50 rounded-3xl text-center font-medium border-2 border-transparent focus:border-indigo-100 outline-none" value={profileData?.bio} onChange={e => setProfileData({...profileData, bio: e.target.value})} placeholder="Tulis biodatamu..." />
+            
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-6 text-left">
+              {Object.entries(CATEGORIES).map(([cat, genres]) => (
+                <div key={cat} className="space-y-4 p-5 bg-slate-50 rounded-[2rem]">
+                  <h5 className="text-[10px] font-black text-indigo-600 uppercase tracking-widest flex items-center gap-2">
+                    {cat === 'musik' && <Music size={12}/>}
+                    {cat === 'film' && <Film size={12}/>}
+                    {cat === 'novel' && <Book size={12}/>}
+                    Genre {cat} Favorit
+                  </h5>
+                  <div className="flex flex-wrap gap-1.5">
+                    {genres.map(g => (
+                      <button key={g} onClick={() => toggleFavGenre(cat, g)} className={`px-2.5 py-1.5 rounded-lg text-[8px] font-black uppercase transition-all ${profileData?.favGenres[cat]?.includes(g) ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white text-slate-400 border border-slate-100'}`}>{g}</button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <button onClick={async () => { await updateDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'info'), profileData); setIsEditingProfile(false); }} className="px-10 py-4 bg-slate-900 text-white rounded-2xl font-black uppercase text-xs shadow-xl">Simpan Profil</button>
+          </div>
+        ) : (
+          <div className="space-y-6">
+            <div className="w-24 h-24 bg-indigo-600 rounded-[2rem] mx-auto flex items-center justify-center text-white text-3xl font-black shadow-xl">
+              {profileData?.displayName?.[0]}
+            </div>
+            <h2 className="text-4xl font-black text-slate-900">{profileData?.displayName}</h2>
+            <p className="text-slate-500 italic max-w-xl mx-auto">"{profileData?.bio}"</p>
+            <div className="flex flex-wrap gap-2 justify-center pt-4">
+              {Object.entries(profileData?.favGenres || {}).map(([cat, genres]) => genres.map(g => (
+                <span key={g} className="px-4 py-1.5 bg-indigo-50 text-indigo-600 rounded-xl text-[9px] font-black uppercase border border-indigo-100">{g}</span>
+              )))}
+            </div>
+            <button onClick={() => setIsEditingProfile(true)} className="px-8 py-3 bg-slate-50 text-slate-500 rounded-2xl text-[10px] font-black uppercase border border-slate-100 flex items-center gap-2 mx-auto hover:bg-white transition-all"><Edit2 size={14} /> Edit Profil</button>
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
+        <section className="space-y-8">
+           <h3 className="text-2xl font-black text-slate-900 flex items-center gap-3"><Heart size={24} className="text-red-500" /> Favorit Saya</h3>
+           <div className="grid grid-cols-2 gap-4">
+              {profileData?.favorites?.map(f => (
+                <div key={f.id} className="bg-white p-4 rounded-3xl border border-slate-100 shadow-sm flex items-center gap-4 group hover:shadow-lg transition-all cursor-pointer" onClick={() => setSelectedItem(allReviews.find(r => r.id === f.id))}>
+                   <div className="w-12 h-16 rounded-xl overflow-hidden shrink-0">
+                      <img src={f.poster} className="w-full h-full object-cover" />
+                   </div>
+                   <div className="flex-1">
+                      <p className="text-[7px] font-black text-indigo-500 uppercase tracking-widest">{f.category}</p>
+                      <h4 className="text-[10px] font-black text-slate-900 line-clamp-2 leading-tight">{f.title}</h4>
+                   </div>
+                </div>
+              ))}
+              {(!profileData?.favorites || profileData.favorites.length === 0) && <p className="col-span-2 text-slate-300 font-bold text-center py-10 bg-slate-50 rounded-3xl border-2 border-dashed border-slate-100">Belum ada favorit.</p>}
+           </div>
+        </section>
+
+        <section className="space-y-8">
+          <h3 className="text-2xl font-black text-slate-900">Riwayat Resensi</h3>
+          <div className="space-y-4">
+            {allReviews.filter(r => r.userId === user?.uid).map(r => (
+              <div key={r.id} className="bg-white p-6 rounded-[2.5rem] border border-slate-100 shadow-sm flex items-center gap-6 group">
+                <div className="w-20 h-20 rounded-2xl overflow-hidden bg-slate-100 shrink-0 cursor-pointer" onClick={() => setSelectedItem(r)}>
+                  <img src={r.poster} className="w-full h-full object-cover" />
+                </div>
+                <div className="flex-1">
+                  <h4 className="font-black text-slate-900 line-clamp-1">{r.title}</h4>
+                  <div className="flex items-center justify-between mt-2">
+                    <StarRating count={r.rating} size={10} />
+                    <button onClick={() => deleteReview(r.id)} className="text-slate-200 hover:text-red-500 transition-colors p-2"><Trash2 size={16} /></button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+
+  const renderWrite = () => (
+    <div className="max-w-4xl mx-auto bg-white rounded-[4rem] p-10 md:p-20 shadow-2xl border border-slate-100 animate-in slide-in-from-bottom-10 duration-700 pb-32">
+      <h2 className="text-4xl font-black text-slate-900 mb-12">Tulis Resensi</h2>
+      <form onSubmit={submitReview} className="space-y-10">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+          <div className="space-y-4">
+            <label className="text-[11px] font-black uppercase text-slate-400 px-2">Kategori</label>
+            <div className="grid grid-cols-3 gap-2">
+              {['musik', 'film', 'novel'].map(cat => (
+                <button key={cat} type="button" onClick={() => setFormData({...formData, category: cat, genre: CATEGORIES[cat][0]})} className={`py-4 rounded-2xl text-[10px] font-black uppercase transition-all ${formData.category === cat ? 'bg-slate-900 text-white shadow-xl' : 'bg-slate-50 text-slate-400'}`}>{cat}</button>
+              ))}
+            </div>
+          </div>
+          <div className="space-y-4">
+            <label className="text-[11px] font-black uppercase text-slate-400 px-2">Genre</label>
+            <select value={formData.genre} onChange={e => setFormData({...formData, genre: e.target.value})} className="w-full p-4 rounded-2xl bg-slate-50 border border-slate-100 font-black text-[11px] uppercase outline-none focus:bg-white transition-all">
+              {CATEGORIES[formData.category].map(g => <option key={g} value={g}>{g}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          <label className="text-[11px] font-black uppercase text-slate-400 px-2">Upload Poster / Cover</label>
+          <div className="flex flex-col md:flex-row gap-8 items-center">
+            <div className="w-48 h-64 bg-slate-50 rounded-[3rem] border-2 border-dashed border-slate-200 overflow-hidden flex items-center justify-center relative group shadow-inner">
+              {formData.poster ? <img src={formData.poster} className="w-full h-full object-cover" /> : <ImageIcon className="text-slate-200" size={40} />}
+              <label className="absolute inset-0 bg-slate-900/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center cursor-pointer">
+                <Upload className="text-white" />
+                <input type="file" className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, (res) => setFormData({...formData, poster: res}))} />
+              </label>
+            </div>
+            <div className="flex-1 space-y-4 w-full">
+              <input placeholder="Nama Karya" value={formData.workTitle} onChange={e => setFormData({...formData, workTitle: e.target.value})} className="w-full p-6 rounded-2xl bg-slate-50 border-2 border-slate-50 focus:border-indigo-600 outline-none font-bold" required />
+              <input placeholder="Judul Resensi" value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} className="w-full p-6 rounded-2xl bg-slate-50 border-2 border-slate-50 focus:border-indigo-600 outline-none font-bold" required />
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-6">
+          <textarea placeholder="Biodata singkat pembuat karya..." rows="2" value={formData.creatorBio} onChange={e => setFormData({...formData, creatorBio: e.target.value})} className="w-full p-6 rounded-3xl bg-slate-50 border-2 border-slate-50 focus:border-indigo-600 outline-none font-medium text-sm" />
+          <textarea placeholder="Tuliskan ulasan Anda..." rows="6" value={formData.content} onChange={e => setFormData({...formData, content: e.target.value})} className="w-full p-8 rounded-[3rem] bg-slate-50 border-2 border-slate-50 focus:border-indigo-600 outline-none font-medium text-lg" required />
+          <div className="bg-slate-50 p-6 rounded-[2.5rem] flex items-center justify-between">
+            <span className="text-[11px] font-black uppercase text-slate-400">Rating:</span>
+            <StarRating count={formData.rating} size={28} interactive onRate={(r) => setFormData({...formData, rating: r})} />
+          </div>
+          <button type="submit" className="w-full bg-slate-900 text-white py-6 rounded-[2.5rem] font-black text-xl hover:bg-indigo-600 transition-all shadow-2xl flex items-center justify-center gap-4">Terbitkan <PlusCircle /></button>
+        </div>
+      </form>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-[#f8fafc] text-slate-900 font-sans selection:bg-indigo-100">
+      <header className="fixed top-0 left-0 right-0 h-20 bg-white/80 backdrop-blur-xl border-b border-slate-100 z-[100] px-6 md:px-12 flex items-center justify-between">
+        <div onClick={() => setActiveTab('home')} className="flex items-center gap-3 cursor-pointer group">
+          <div className="w-10 h-10 bg-slate-900 rounded-xl flex items-center justify-center text-white group-hover:rotate-12 transition-transform shadow-lg"><Sparkles size={20} /></div>
+          <span className="text-xl font-black tracking-tighter uppercase hidden md:block">ReviewVerse</span>
+        </div>
+        <div className="w-10 h-10 bg-indigo-50 rounded-xl flex items-center justify-center text-indigo-600 border border-indigo-100 cursor-pointer hover:bg-indigo-600 hover:text-white transition-all" onClick={() => setActiveTab('profile')}><User size={20} /></div>
+      </header>
+
+      <main className="max-w-7xl mx-auto px-6 md:px-12 pt-28">
+        {activeTab === 'home' && renderHome()}
+        {activeTab === 'profile' && renderProfile()}
+        {activeTab === 'write' && renderWrite()}
+      </main>
+
+      <nav className="fixed bottom-0 left-0 right-0 h-20 bg-white border-t border-slate-100 z-[100] flex items-center justify-around px-4 shadow-[0_-10px_30px_-15px_rgba(0,0,0,0.1)]">
+         <button onClick={() => setActiveTab('home')} className={`flex flex-col items-center gap-1 ${activeTab === 'home' ? 'text-indigo-600' : 'text-slate-300'}`}><Home size={22} /><span className="text-[9px] font-black uppercase">Beranda</span></button>
+         <button onClick={() => setActiveTab('write')} className={`flex flex-col items-center gap-1 ${activeTab === 'write' ? 'text-indigo-600' : 'text-slate-300'}`}><div className={`p-2.5 rounded-2xl ${activeTab === 'write' ? 'bg-indigo-600 text-white shadow-lg -translate-y-3' : 'bg-slate-50'}`}><PlusCircle size={24} /></div><span className="text-[9px] font-black uppercase">Tulis</span></button>
+         <button onClick={() => setActiveTab('profile')} className={`flex flex-col items-center gap-1 ${activeTab === 'profile' ? 'text-indigo-600' : 'text-slate-300'}`}><User size={22} /><span className="text-[9px] font-black uppercase">Profil</span></button>
+      </nav>
+
+      {selectedItem && (
+        <div className="fixed inset-0 bg-slate-900/95 backdrop-blur-2xl z-[200] flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-5xl max-h-[92vh] rounded-[4rem] overflow-hidden shadow-2xl flex flex-col md:flex-row relative animate-in zoom-in-95 duration-500">
+            <button onClick={() => setSelectedItem(null)} className="absolute top-8 right-8 z-[210] bg-white p-4 rounded-full text-slate-900 hover:text-red-500 shadow-xl border border-slate-100 transition-all hover:rotate-90"><X size={24} /></button>
+            
+            <div className="w-full md:w-[42%] bg-slate-100 relative h-72 md:h-auto shrink-0 overflow-hidden group">
+              <img src={selectedItem.poster} className="w-full h-full object-cover" alt="Poster" />
+              <div className="absolute inset-0 bg-gradient-to-t from-slate-900/90 via-slate-900/20 to-transparent flex flex-col justify-end p-12">
+                 <span className="px-5 py-2 bg-indigo-600 rounded-full text-[10px] font-black uppercase tracking-widest text-white self-start mb-4 shadow-xl">{selectedItem.genre}</span>
+                 <h2 className="text-4xl md:text-5xl font-black text-white leading-tight tracking-tighter mb-2">{selectedItem.workTitle}</h2>
+                 <p className="text-xl text-indigo-300 font-bold uppercase tracking-wide">Oleh: {selectedItem.author}</p>
+              </div>
+              
+              <label className="absolute top-8 left-8 bg-white/20 backdrop-blur-md p-4 rounded-3xl text-white opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer border border-white/30 flex items-center gap-2 font-bold text-xs uppercase">
+                <Camera size={18} /> Ganti Foto Permanen
+                <input type="file" className="hidden" accept="image/*" onChange={(e) => handleFileUpload(e, updateItemPoster)} />
+              </label>
+            </div>
+
+            <div className="flex-1 p-10 md:p-16 overflow-y-auto custom-scrollbar space-y-12 bg-white">
+              <div className="flex items-center justify-between py-8 border-b border-slate-100">
+                 <div className="space-y-1.5">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Penilaian</p>
+                    <StarRating count={selectedItem.rating} size={24} interactive onRate={(r) => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'reviews', selectedItem.id), { rating: r })} />
+                 </div>
+                 <button onClick={() => toggleFavorite(selectedItem)} className={`p-5 rounded-3xl border transition-all ${profileData?.favorites?.some(f => f.id === selectedItem.id) ? 'bg-red-50 text-red-500 border-red-100' : 'bg-slate-50 text-slate-300 border-slate-100'}`}>
+                   <Heart size={24} fill={profileData?.favorites?.some(f => f.id === selectedItem.id) ? "currentColor" : "none"} />
+                 </button>
+              </div>
+
+              <div className="space-y-6">
+                <h3 className="text-2xl font-black text-slate-900 flex items-center gap-4"><BookOpen size={24} className="text-indigo-600" /> Resensi</h3>
+                <div className="text-slate-600 text-lg md:text-xl font-medium leading-relaxed whitespace-pre-wrap border-l-4 border-indigo-500 pl-8 py-2 italic">
+                  "{selectedItem.content}"
+                </div>
+              </div>
+
+              <div className="p-10 bg-slate-50 rounded-[3.5rem] border border-slate-100 space-y-6">
+                <h3 className="text-[11px] font-black uppercase tracking-widest text-slate-900 flex items-center gap-3"><Sparkles size={18} className="text-amber-500" /> Biodata Kreator</h3>
+                <p className="text-slate-500 text-base md:text-lg font-medium leading-loose">{selectedItem.creatorBio || "Biodata lengkap belum tersedia."}</p>
+              </div>
+
+              <div className="space-y-10 pt-10 border-t border-slate-100">
+                 <h3 className="text-lg font-black uppercase tracking-widest flex items-center gap-4"><MessageCircle size={22} className="text-indigo-600" /> Diskusi ({comments.length})</h3>
+                 <form onSubmit={postComment} className="flex gap-4">
+                    <input value={newComment} onChange={e => setNewComment(e.target.value)} placeholder="Tulis komentar..." className="flex-1 p-5 rounded-3xl bg-slate-50 border-2 border-transparent outline-none font-medium focus:border-indigo-500 focus:bg-white transition-all" />
+                    <button type="submit" className="p-5 bg-slate-900 text-white rounded-3xl hover:bg-indigo-600 transition-all shadow-xl"><Send size={24} /></button>
+                 </form>
+                 <div className="space-y-5">
+                    {comments.map(c => (
+                      <div key={c.id} className="bg-slate-50 p-6 rounded-3xl border border-slate-100">
+                         <div className="flex justify-between items-center mb-2">
+                            <span className="text-[10px] font-black uppercase text-indigo-600">{c.author}</span>
+                            <span className="text-[9px] text-slate-300 font-bold">{new Date(c.createdAt).toLocaleDateString()}</span>
+                         </div>
+                         <p className="text-slate-600 font-medium">{c.text}</p>
+                      </div>
+                    ))}
+                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <style>{`
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-in { animation: fadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+      `}</style>
+    </div>
+  );
+}
